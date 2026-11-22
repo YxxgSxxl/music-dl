@@ -1,0 +1,9 @@
+# Sorties du script et fichiers créés par Windows
+/downloads/
+.music-dl-*/
+_assets/
+*.part
+*.ytdl
+folder.ico
+[Dd]esktop.ini
+Thumbs.db
