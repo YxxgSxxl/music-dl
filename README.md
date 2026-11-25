@@ -26,11 +26,11 @@ Depuis le dossier du script, lance la commande suivante dans PowerShell ou dans 
 .\music_dl.bat
 ```
 
-Colle un lien que tu es autorisé à télécharger, puis choisis un dossier de destination. Si le nom d’un dossier est déjà pris, le script ajoute un suffixe comme `(2)`. Les pistes d’une playlist sont numérotées et le format audio dépend de la source.
+Colle un lien que tu es autorisé à télécharger, puis choisis un dossier de destination. Si le nom d’un dossier est déjà pris, le script ajoute un suffixe comme `(2)`. Les pistes d’une playlist sont numérotées (`001`, `002`, etc.) et le format audio dépend de la source. Les noms longs sont raccourcis en fonction de la destination. Si le chemin reste trop profond, choisis un dossier plus proche de la racine.
 
-Le dossier `_assets` contient le raccourci vers la page d’origine et, si elle est disponible, la pochette. Le script peut récupérer l’icône du site via Google et la mettre en cache dans `%LOCALAPPDATA%\MusicDownloader\icons`.
+Le dossier `_assets` contient le raccourci vers la page d’origine et, si elle est disponible, la pochette. Lorsque la conversion réussit, l’Explorateur Windows utilise cette pochette comme icône du dossier.
 
-Appuie sur `Q` au menu principal pour quitter. Si le script signale un échec après le début d’un téléchargement, note le chemin du dossier de travail affiché pour retrouver les fichiers déjà récupérés. Ce dossier se trouve dans la destination choisie.
+Appuie sur `Q` au menu principal pour quitter. Si une playlist se termine partiellement, l’écran affiche les dossiers enregistrés. En cas d’échec ou s’il reste des fichiers de travail, le script affiche aussi le chemin du dossier temporaire conservé dans la destination choisie.
 
 ## Mise à jour de yt-dlp
 

@@ -9,6 +9,7 @@ exit /b %ERRORLEVEL%
 
 # MUSIC_DL_POWERSHELL
 $ErrorActionPreference = 'Stop'
+$stableDownloaderVersionPattern = '^\d{4}\.\d{2}\.\d{2}(?:\.\d+)?$'
 
 function Read-MusicInput {
     param([string]$Prompt)
@@ -170,7 +171,7 @@ function Invoke-Downloader {
 
     # Windows PowerShell can surface native stderr as PowerShell error records.
     $ErrorActionPreference = 'Continue'
-    & $Executable --ignore-config --encoding utf-8 @Arguments
+    & $Executable --ignore-config --encoding utf-8 --socket-timeout 30 @Arguments
 }
 
 function Get-DownloaderVersion {
@@ -185,7 +186,7 @@ function Get-DownloaderVersion {
 
 function Get-StableDownloaderRelease {
     $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest' -UseBasicParsing -TimeoutSec 5
-    if ($release.tag_name -notmatch '^\d{4}\.\d{2}\.\d{2}$') {
+    if ($release.tag_name -notmatch $stableDownloaderVersionPattern) {
         throw 'Version stable inattendue.'
     }
     $release.tag_name
@@ -219,7 +220,7 @@ function Offer-DownloaderUpdate {
     param([string]$Executable)
 
     $installed = Get-DownloaderVersion $Executable
-    if ($installed -notmatch '^\d{4}\.\d{2}\.\d{2}$') {
+    if ($installed -notmatch $stableDownloaderVersionPattern) {
         Write-MusicStatus 'INFO' "yt-dlp $installed. Le contrôle concerne les versions stables."
         return
     }
@@ -249,7 +250,7 @@ function Offer-DownloaderUpdate {
     }
 
     $usable = Get-DownloaderVersion $Executable
-    if ($usable -match '^\d{4}\.\d{2}\.\d{2}$' -and [version]$usable -ge [version]$latest) {
+    if ($usable -match $stableDownloaderVersionPattern -and [version]$usable -ge [version]$latest) {
         Write-MusicStatus 'OK' "yt-dlp $usable est prêt." -Color Green
     } else {
         Write-MusicStatus '!' "La version $usable est toujours utilisée." -Color Yellow
@@ -325,32 +326,6 @@ function Get-CompletedDownloadFolders {
     $folders.Values
 }
 
-function Get-WebsiteIcon {
-    param([Uri]$Uri, [string]$Ffmpeg)
-
-    # The cache belongs to the app. Use unique temporary files for parallel runs.
-    $cache = Join-Path $env:LOCALAPPDATA 'MusicDownloader\icons'
-    $name = $Uri.IdnHost -replace '[^A-Za-z0-9.-]', '_'
-    $icon = Join-Path $cache "$name.ico"
-    if ([IO.File]::Exists($icon)) { return $icon }
-
-    $temporary = Join-Path $cache ([Guid]::NewGuid().ToString('N'))
-    try {
-        [void][IO.Directory]::CreateDirectory($cache)
-        $faviconUrl = 'https://www.google.com/s2/favicons?sz=128&domain=' + [Uri]::EscapeDataString($Uri.IdnHost)
-        Invoke-WebRequest -UseBasicParsing -Uri $faviconUrl -TimeoutSec 5 -OutFile "$temporary.png"
-        & $Ffmpeg -nostdin -loglevel error -i "$temporary.png" -vf 'scale=64:64' -frames:v 1 "$temporary.ico" | Out-Host
-        if ($LASTEXITCODE -eq 0 -and [IO.File]::Exists("$temporary.ico")) {
-            [IO.File]::Move("$temporary.ico", $icon)
-        }
-    } catch {
-        # A favicon is optional, including if another instance fills the cache.
-    } finally {
-        Remove-Item -LiteralPath "$temporary.png", "$temporary.ico" -ErrorAction SilentlyContinue
-    }
-    if ([IO.File]::Exists($icon)) { return $icon }
-}
-
 function Move-DownloadedCover {
     param($Entry, [string]$Assets)
 
@@ -363,6 +338,7 @@ function Move-DownloadedCover {
     if ($thumbnails.Count -eq 0) { return }
 
     $coverPath = Join-Path $Assets ('cover' + $thumbnails[0].Extension)
+    if ([IO.File]::Exists($coverPath)) { return (Get-Item -LiteralPath $coverPath) }
     [IO.File]::Move($thumbnails[0].FullName, $coverPath)
     # Extra track thumbnails belong to this staged download.
     foreach ($file in $thumbnails) {
@@ -393,41 +369,51 @@ public static class MusicDownloaderExplorer {
 }
 
 function Add-DownloadAssets {
-    param($Entry, [Uri]$Uri, [bool]$IsPlaylist, [hashtable]$Tools, [string]$WebsiteIcon)
+    param($Entry, [Uri]$Uri, [bool]$IsPlaylist, [hashtable]$Tools)
 
     $folder = $Entry.Folder
     $assets = Join-Path $folder.FullName '_assets'
     [void][IO.Directory]::CreateDirectory($assets)
 
     Write-MusicStatus '4/6' 'Récupération de la pochette...'
-    $cover = Move-DownloadedCover $Entry $assets
-    if (-not $cover) {
-        $coverArguments = @('--skip-download', '--write-thumbnail', '-P', $assets, '-o', 'cover.%(ext)s')
-        if ($Entry.FirstUrl) {
-            $coverArguments += @('--no-playlist', '--', $Entry.FirstUrl.AbsoluteUri)
-        } elseif ($IsPlaylist) {
-            $coverArguments += @('--yes-playlist', '--playlist-items', '1', '--', $Uri.AbsoluteUri)
-        } else {
-            $coverArguments += @('--no-playlist', '--', $Uri.AbsoluteUri)
+    $cover = $null
+    try {
+        $cover = Move-DownloadedCover $Entry $assets
+        if (-not $cover) {
+            $coverArguments = @('--skip-download', '--write-thumbnail', '-P', $assets, '-o', 'cover.%(ext)s')
+            if ($Entry.FirstUrl) {
+                $coverArguments += @('--no-playlist', '--', $Entry.FirstUrl.AbsoluteUri)
+            } elseif ($IsPlaylist) {
+                $coverArguments += @('--yes-playlist', '--playlist-items', '1', '--', $Uri.AbsoluteUri)
+            } else {
+                $coverArguments += @('--no-playlist', '--', $Uri.AbsoluteUri)
+            }
+            Invoke-Downloader $Tools['yt-dlp'] $coverArguments | Out-Host
+            $cover = Get-ChildItem -LiteralPath $assets -File | Where-Object {
+                $_.BaseName -eq 'cover' -and $_.Extension -in '.jpg', '.jpeg', '.png', '.webp', '.avif', '.gif', '.bmp'
+            } | Select-Object -First 1
         }
-        Invoke-Downloader $Tools['yt-dlp'] $coverArguments | Out-Host
-        $cover = Get-ChildItem -LiteralPath $assets -File | Where-Object {
-            $_.BaseName -eq 'cover' -and $_.Extension -in '.jpg', '.jpeg', '.png', '.webp', '.avif', '.gif', '.bmp'
-        } | Select-Object -First 1
-    }
-    if (-not $cover) {
-        Write-Warning "Pochette indisponible pour $($folder.Name)."
+        if (-not $cover) { Write-Warning "Pochette indisponible pour $($folder.Name)." }
+    } catch {
+        Write-Warning "Pochette indisponible pour $($folder.Name). $($_.Exception.Message)"
     }
 
     Write-MusicStatus '5/6' 'Création du raccourci...'
-    $shortcut = @('[InternetShortcut]', "URL=$($Uri.AbsoluteUri)")
-    if ($WebsiteIcon) {
-        $shortcut += @("IconFile=$WebsiteIcon", 'IconIndex=0')
+    try {
+        $shortcut = @('[InternetShortcut]', "URL=$($Uri.AbsoluteUri)")
+        $shortcutPath = Join-Path $assets ($folder.Name + '.url')
+        [IO.File]::WriteAllLines($shortcutPath, $shortcut, [Text.Encoding]::Unicode)
+    } catch {
+        Write-Warning "Raccourci indisponible pour $($folder.Name). $($_.Exception.Message)"
     }
-    $shortcutPath = Join-Path $assets ($folder.Name + '.url')
-    [IO.File]::WriteAllLines($shortcutPath, $shortcut, [Text.Encoding]::Unicode)
 
-    if ($cover) { $null = Set-MusicFolderIcon $folder $cover $Tools['ffmpeg'] }
+    if ($cover) {
+        try {
+            $null = Set-MusicFolderIcon $folder $cover $Tools['ffmpeg']
+        } catch {
+            Write-Warning "Icône indisponible pour $($folder.Name). $($_.Exception.Message)"
+        }
+    }
 }
 
 function Set-MusicFolderIcon {
@@ -471,6 +457,61 @@ function Move-CompletedDownloadFolder {
     throw "Aucun nom libre pour $($Folder.Name). Choisis un autre dossier de destination."
 }
 
+function Move-IncompleteDownloadFiles {
+    param($Entry, [string]$RecoveryRoot)
+
+    $keep = @('folder.ico', 'desktop.ini') + @($Entry.Tracks | ForEach-Object Name)
+    $remaining = @(Get-ChildItem -LiteralPath $Entry.Folder.FullName -File -Force |
+        Where-Object { $_.Name -notin $keep })
+    if ($remaining.Count -eq 0) { return }
+
+    $recovery = [IO.Directory]::CreateDirectory((Join-Path $RecoveryRoot $Entry.Folder.Name))
+    foreach ($file in $remaining) {
+        [IO.File]::Move($file.FullName, (Join-Path $recovery.FullName $file.Name))
+    }
+}
+
+function Get-MusicDownloadArguments {
+    param([Uri]$Uri, [string]$WorkDirectory, [string]$Manifest, [bool]$IsPlaylist)
+
+    # Leave room under the legacy Windows path limit for both names and FFmpeg's temporary suffixes.
+    $nameBytes = [Math]::Min(80, [int][Math]::Floor((240 - $WorkDirectory.Length - 32) / 2))
+    if ($nameBytes -lt 20) {
+        throw 'Destination trop longue. Choisis un dossier plus proche de la racine, par exemple D:\Musique.'
+    }
+
+    $title = "%(filename_title,id).${nameBytes}B"
+    $arguments = @(
+        '--windows-filenames', '--no-simulate', '--parse-metadata', '%(title|)s:(?s)(?P<filename_title>.+)',
+        '-f', 'bestaudio/best', '-x', '--audio-format', 'best', '--write-thumbnail', '--no-write-playlist-metafiles',
+        '--use-postprocessor', 'FFmpegMetadata:when=after_move',
+        '--use-postprocessor', 'EmbedThumbnail:when=after_move;already_have_thumbnail=True',
+        '-P', $WorkDirectory,
+        '--print-to-file', 'after_move:%(.{filepath,webpage_url})j', $Manifest
+    )
+
+    if ($IsPlaylist) {
+        $arguments += @('--yes-playlist', '--parse-metadata', 'pre_process:%(playlist|)s:(?s)(?P<filename_playlist>.+)')
+        $fields = 'filename_title,filename_playlist'
+        $template = "%(filename_playlist,playlist_id).${nameBytes}B\%(playlist_index)03d - $title.%(ext)s"
+    } else {
+        $arguments += '--no-playlist'
+        $fields = 'filename_title'
+        $template = "$title\$title.%(ext)s"
+    }
+
+    # Windows PowerShell drops empty native arguments unless explicitly quoted.
+    $emptyReplacement = ''
+    if ($PSVersionTable.PSVersion.Major -lt 7) { $emptyReplacement = '""' }
+    $reservedName = '(?i)^(?:CON|PRN|AUX|NUL|(?:COM|LPT)[1-9\u00B9\u00B2\u00B3]|CONIN\$|CONOUT\$)(?=\s*(?:\.|$))'
+    $arguments += @(
+        '--replace-in-metadata', $fields, '[\s.]+$', $emptyReplacement,
+        '--replace-in-metadata', $fields, $reservedName, '_\g<0>',
+        '-o', $template, '--', $Uri.AbsoluteUri
+    )
+    $arguments
+}
+
 function Save-MusicDownload {
     param([Uri]$Uri, [string]$Destination, [bool]$IsPlaylist, [hashtable]$Tools)
 
@@ -478,42 +519,16 @@ function Save-MusicDownload {
     if ($directory -isnot [IO.DirectoryInfo]) {
         throw 'La destination doit être un dossier.'
     }
-    $work = Join-Path $directory.FullName ('.music-dl-' + [Guid]::NewGuid().ToString('N'))
+    $work = Join-Path $directory.FullName ('.music-dl-' + [Guid]::NewGuid().ToString('N').Substring(0, 16))
+    $manifest = Join-Path $work 'completed.jsonl'
+    $arguments = @(Get-MusicDownloadArguments $Uri $work $manifest $IsPlaylist)
     try {
         $work = [IO.Directory]::CreateDirectory($work).FullName
     } catch {
         throw "Impossible de créer le dossier temporaire dans $($directory.FullName). $($_.Exception.Message)"
     }
-    $manifest = Join-Path $work 'completed.jsonl'
     $finished = @()
     try {
-        $arguments = @(
-            '--windows-filenames', '--no-simulate', '--parse-metadata', 'title:filename_title',
-            '-f', 'bestaudio/best', '-x', '--audio-format', 'best', '--write-thumbnail', '--no-write-playlist-metafiles',
-            '--use-postprocessor', 'FFmpegMetadata:when=after_move',
-            '--use-postprocessor', 'EmbedThumbnail:when=after_move;already_have_thumbnail=True',
-            '-P', $work,
-            '--print-to-file', 'after_move:%(.{filepath,webpage_url})j', $manifest
-        )
-
-        if ($IsPlaylist) {
-            $arguments += @('--yes-playlist', '--parse-metadata', 'pre_process:playlist:filename_playlist')
-            $fields = 'filename_title,filename_playlist'
-            $template = '%(filename_playlist,playlist_id).80s\%(playlist_index)02d - %(filename_title,id).80s.%(ext)s'
-        } else {
-            $arguments += '--no-playlist'
-            $fields = 'filename_title'
-            $template = '%(filename_title,id).80s\%(filename_title,id).80s.%(ext)s'
-        }
-
-        # Windows PowerShell drops empty native arguments unless explicitly quoted.
-        $emptyReplacement = ''
-        if ($PSVersionTable.PSVersion.Major -lt 7) { $emptyReplacement = '""' }
-        $arguments += @(
-            '--replace-in-metadata', $fields, '[\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f]', $emptyReplacement,
-            '--replace-in-metadata', $fields, '[\s.]+$', $emptyReplacement,
-            '-o', $template, '--', $Uri.AbsoluteUri
-        )
         if ($IsPlaylist) {
             Write-MusicStatus '3/6' 'Téléchargement de la playlist...'
         } else {
@@ -526,12 +541,19 @@ function Save-MusicDownload {
         }
 
         $folders = @(Get-CompletedDownloadFolders $work $manifest)
-        $websiteIcon = Get-WebsiteIcon $Uri $Tools['ffmpeg']
+        $recoveryRoot = Join-Path $work ('.partial-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
         foreach ($entry in $folders) {
             try {
-                Add-DownloadAssets $entry $Uri $IsPlaylist $Tools $websiteIcon
+                Add-DownloadAssets $entry $Uri $IsPlaylist $Tools
             } catch {
                 Write-Warning "Accessoires indisponibles pour $($entry.Folder.Name). $($_.Exception.Message)"
+            }
+            if ($downloadExit -ne 0) {
+                try {
+                    Move-IncompleteDownloadFiles $entry $recoveryRoot
+                } catch {
+                    Write-Warning "Certains fichiers de travail sont restés dans $($entry.Folder.Name). $($_.Exception.Message)"
+                }
             }
             $path = Move-CompletedDownloadFolder $entry.Folder $directory.FullName
             $finished += $path
@@ -540,15 +562,17 @@ function Save-MusicDownload {
 
         # Only remove the manifest and an empty directory that we created.
         [IO.File]::Delete($manifest)
+        $remainingWork = $null
         if ([IO.Directory]::GetFileSystemEntries($work).Length -eq 0) {
             [IO.Directory]::Delete($work)
         } else {
-            Write-Warning "Des fichiers de travail sont encore disponibles dans $work"
+            $remainingWork = $work
         }
-        if ($downloadExit -ne 0) {
-            Write-Warning "yt-dlp a renvoyé le code $downloadExit. Seuls les titres finalisés ont été enregistrés."
+        [pscustomobject]@{
+            Paths = $finished
+            WorkDirectory = $remainingWork
+            DownloaderExitCode = $downloadExit
         }
-        $finished
     } catch {
         foreach ($path in $finished) {
             Write-Host "Déjà enregistré : $path"
@@ -560,7 +584,7 @@ function Save-MusicDownload {
 
 function Start-MusicDownloader {
     $mainHeading = 'YxxgSxxl Music Downloader'
-    $mainSubtitle = 'Audio et playlists'
+    $mainSubtitle = 'Audio et playlists | v1.0.1'
     Initialize-MusicConsole $mainHeading
     Show-MusicHeader $mainHeading $mainSubtitle
 
@@ -603,14 +627,24 @@ function Start-MusicDownloader {
             Write-MusicStatus 'OK' 'Destination sélectionnée' -Color Green
             Write-Host "       $destination"
             Write-Host ''
-            $saved = @(Save-MusicDownload $uri $destination $source.IsPlaylist $tools)
-            Start-Sleep -Seconds 1
-            Show-MusicHeader 'TÉLÉCHARGEMENT TERMINÉ'
+            $download = Save-MusicDownload $uri $destination $source.IsPlaylist $tools
+            if ($download.DownloaderExitCode -ne 0) {
+                $status = 1
+                Show-MusicHeader 'TÉLÉCHARGEMENT PARTIEL' -KeepContent
+                Write-MusicStatus '!' "yt-dlp a signalé une erreur (code $($download.DownloaderExitCode))." -Color Yellow
+            } else {
+                Start-Sleep -Seconds 1
+                Show-MusicHeader 'TÉLÉCHARGEMENT TERMINÉ'
+            }
             Write-Host "  Plateforme  : $($source.Platform)"
             Write-Host ''
             Write-Host '  Destination :'
-            foreach ($path in $saved) {
+            foreach ($path in $download.Paths) {
                 Write-Host "  $path"
+            }
+            if ($download.WorkDirectory) {
+                Write-Host ''
+                Write-MusicStatus '!' "Fichiers de travail conservés : $($download.WorkDirectory)" -Color Yellow
             }
         } catch {
             $status = 1
